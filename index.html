@@ -2716,12 +2716,11 @@
             document.getElementById('current-user-display').textContent = '👤 ' + activeUser.username +
                 (activeUser.isSubAccount ? ' (子账号)' : '');
 
-            // 显示品牌闪屏，2.5秒后进入首页
+            // 品牌闪屏由 onload 自动处理，这里只等待后进入首页
             var splash = document.getElementById('splashScreen');
-            splash.classList.remove('hidden', 'fade-out');
+            var splashWait = splash && !splash.classList.contains('hidden') && !splash.classList.contains('fade-out') ? 2500 : 200;
             setTimeout(function() {
-                splash.classList.add('fade-out');
-                setTimeout(function() { splash.classList.add('hidden'); }, 800);
+                if (splash) { splash.classList.add('fade-out'); setTimeout(function() { splash.classList.add('hidden'); }, 800); }
                 document.body.classList.add('on-home');
                 loadInventory();
                 loadConsumeOptions();
@@ -4103,6 +4102,13 @@
 
         // 初始化
         window.onload = function() {
+            // 先让闪屏自动消失（2秒后），不依赖登录状态
+            var splash = document.getElementById('splashScreen');
+            setTimeout(function() {
+                splash.classList.add('fade-out');
+                setTimeout(function() { splash.classList.add('hidden'); }, 800);
+            }, 2000);
+
             // 1. 先检查自动登录（30天内有效）
             var autoLoginData = checkAutoLogin();
             if (autoLoginData) {
