@@ -5359,12 +5359,13 @@
         // 构建同步数据
         function buildSyncPayload() {
             return {
-                version: 2,
+                version: 3,
                 updatedAt: new Date().toISOString(),
-                user: activeUser ? { id: activeUser.id, username: activeUser.username } : null,
+                user: activeUser ? { id: activeUser.id, username: activeUser.username, isSubAccount: activeUser.isSubAccount, parentAccountId: activeUser.parentAccountId } : null,
                 filaments: filaments,
                 history: history,
-                printers: JSON.parse(localStorage.getItem(getUserKey('bambu_printers'))) || []
+                printers: JSON.parse(localStorage.getItem(getUserKey('bambu_printers'))) || [],
+                accounts: getAccounts()
             };
         }
 
@@ -5372,8 +5373,10 @@
         function cloudPush() {
             if (!supabaseClient || !activeUser) return;
             var payload = buildSyncPayload();
+            // 子账号和主账号用同一个 user_id，确保数据共享
+            var syncUserId = activeUser.isSubAccount ? (activeUser.parentAccountId || activeUser.id) : activeUser.id;
             supabaseClient.from('user_data').upsert({
-                user_id: activeUser.id,
+                user_id: syncUserId,
                 username: activeUser.username,
                 data: payload,
                 updated_at: new Date().toISOString()
@@ -5391,7 +5394,8 @@
         // 从云端拉取
         function cloudPull() {
             if (!supabaseClient || !activeUser) return Promise.resolve(false);
-            return supabaseClient.from('user_data').select('*').eq('user_id', activeUser.id).maybeSingle()
+            var syncUserId = activeUser.isSubAccount ? (activeUser.parentAccountId || activeUser.id) : activeUser.id;
+            return supabaseClient.from('user_data').select('*').eq('user_id', syncUserId).maybeSingle()
                 .then(function(res) {
                     if (res.error) {
                         console.warn('Cloud pull error:', res.error.message);
@@ -5400,15 +5404,21 @@
                     if (res.data && res.data.data) {
                         var cloudData = res.data.data;
                         if (cloudData.filaments && Array.isArray(cloudData.filaments)) {
-                            // 云端有数据，检查是否比本地新
                             var localTime = localStorage.getItem(SYNC_LAST_KEY);
                             var cloudTime = res.data.updated_at || cloudData.updatedAt;
-                            // 如果云端数据比本地新（或本地没同步过），使用云端数据
                             if (!localTime || cloudTime > localTime) {
                                 filaments = cloudData.filaments;
                                 history = cloudData.history || [];
                                 if (cloudData.printers) {
                                     localStorage.setItem(getUserKey('bambu_printers'), JSON.stringify(cloudData.printers));
+                                }
+                                // 同步账号列表（合并而非覆盖，保留本地已有的账号）
+                                if (cloudData.accounts && Array.isArray(cloudData.accounts)) {
+                                    var localAccounts = getAccounts();
+                                    var merged = {};
+                                    localAccounts.forEach(function(a) { merged[a.id] = a; });
+                                    cloudData.accounts.forEach(function(a) { merged[a.id] = a; });
+                                    saveAccounts(Object.values(merged));
                                 }
                                 try { localStorage.setItem(SYNC_LAST_KEY, cloudTime); } catch(e) {}
                                 return true;
