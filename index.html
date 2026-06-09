@@ -2707,7 +2707,7 @@
             return null;
         }
 
-        // 解锁应用
+        // 解锁应用（手动登录后调用）
         function unlockApp() {
             loginVerified = true;
             loadUserData();
@@ -2715,23 +2715,17 @@
             document.getElementById('login-overlay').classList.remove('active');
             document.getElementById('current-user-display').textContent = '👤 ' + activeUser.username +
                 (activeUser.isSubAccount ? ' (子账号)' : '');
-
-            // 品牌闪屏由 onload 自动处理，这里只等待后进入首页
-            var splash = document.getElementById('splashScreen');
-            var splashWait = splash && !splash.classList.contains('hidden') && !splash.classList.contains('fade-out') ? 2500 : 200;
-            setTimeout(function() {
-                if (splash) { splash.classList.add('fade-out'); setTimeout(function() { splash.classList.add('hidden'); }, 800); }
-                document.body.classList.add('on-home');
-                loadInventory();
-                loadConsumeOptions();
-                loadHistory();
-                loadPrinters();
-                initializePWA();
-                setupMobileOptimizations();
-                if (window.bambuConnector) {
-                    window.bambuConnector.onStatusUpdate = onPrinterStatusUpdate;
-                }
-            }, 2500);
+            // 手动登录时闪屏已消失，直接显示首页
+            document.body.classList.add('on-home');
+            loadInventory();
+            loadConsumeOptions();
+            loadHistory();
+            loadPrinters();
+            initializePWA();
+            setupMobileOptimizations();
+            if (window.bambuConnector) {
+                window.bambuConnector.onStatusUpdate = onPrinterStatusUpdate;
+            }
         }
 
         // 退出登录
@@ -4102,12 +4096,7 @@
 
         // 初始化
         window.onload = function() {
-            // 先让闪屏自动消失（2秒后），不依赖登录状态
             var splash = document.getElementById('splashScreen');
-            setTimeout(function() {
-                splash.classList.add('fade-out');
-                setTimeout(function() { splash.classList.add('hidden'); }, 800);
-            }, 2000);
 
             // 1. 先检查自动登录（30天内有效）
             var autoLoginData = checkAutoLogin();
@@ -4118,21 +4107,46 @@
                     isSubAccount: autoLoginData.isSubAccount || false,
                     parentAccountId: autoLoginData.parentAccountId || null
                 };
-                unlockApp();
-                return; // 自动登录成功，跳过登录界面
+                // 自动登录：先设置on-home状态，闪屏结束后直接看到首页
+                loginVerified = true;
+                loadUserData();
+                migrateOldData();
+                document.getElementById('login-overlay').classList.remove('active');
+                document.getElementById('current-user-display').textContent = '👤 ' + activeUser.username +
+                    (activeUser.isSubAccount ? ' (子账号)' : '');
+                document.body.classList.add('on-home');
+                // 闪屏2.5秒后消失，露出首页
+                setTimeout(function() {
+                    splash.classList.add('fade-out');
+                    setTimeout(function() { splash.classList.add('hidden'); }, 800);
+                    loadInventory();
+                    loadConsumeOptions();
+                    loadHistory();
+                    loadPrinters();
+                    initializePWA();
+                    setupMobileOptimizations();
+                    if (window.bambuConnector) {
+                        window.bambuConnector.onStatusUpdate = onPrinterStatusUpdate;
+                    }
+                }, 2500);
+                return;
             }
 
-            // 2. 无有效自动登录 → 显示登录界面
-            var accounts = getAccounts();
-            document.getElementById('login-overlay').classList.add('active');
-            if (accounts.length === 0) {
-                setLoginMode('register');
-                document.getElementById('login-title').textContent = '🎨 在树设计-3D耗材仓库';
-                document.getElementById('login-subtitle').textContent = '请先创建一个账号';
-            } else {
-                setLoginMode('login');
-            }
-            document.getElementById('login-username').focus();
+            // 2. 无有效自动登录 → 闪屏消失后显示登录界面
+            setTimeout(function() {
+                splash.classList.add('fade-out');
+                setTimeout(function() { splash.classList.add('hidden'); }, 800);
+                var accounts = getAccounts();
+                document.getElementById('login-overlay').classList.add('active');
+                if (accounts.length === 0) {
+                    setLoginMode('register');
+                    document.getElementById('login-title').textContent = '🎨 在树设计-3D耗材仓库';
+                    document.getElementById('login-subtitle').textContent = '请先创建一个账号';
+                } else {
+                    setLoginMode('login');
+                }
+                document.getElementById('login-username').focus();
+            }, 2000);
         };
 
         // PWA 支持
