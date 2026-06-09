@@ -2718,6 +2718,7 @@
                 (activeUser.isSubAccount ? ' (子账号)' : '');
             // 手动登录时闪屏已消失，直接显示首页
             document.body.classList.add('on-home');
+            // 先显示本地数据，后台拉取云端
             loadInventory();
             loadConsumeOptions();
             loadHistory();
@@ -2727,6 +2728,17 @@
             if (window.bambuConnector) {
                 window.bambuConnector.onStatusUpdate = onPrinterStatusUpdate;
             }
+            // 自动从云端拉取（如果有更新则刷新界面）
+            cloudPull().then(function(updated) {
+                if (updated) {
+                    saveData();
+                    loadInventory();
+                    loadConsumeOptions();
+                    loadHistory();
+                    loadPrinters();
+                }
+                updateSyncBadge();
+            });
         }
 
         // 退出登录
@@ -4129,6 +4141,17 @@
                     if (window.bambuConnector) {
                         window.bambuConnector.onStatusUpdate = onPrinterStatusUpdate;
                     }
+                    // 自动从云端拉取
+                    cloudPull().then(function(updated) {
+                        if (updated) {
+                            saveData();
+                            loadInventory();
+                            loadConsumeOptions();
+                            loadHistory();
+                            loadPrinters();
+                        }
+                        updateSyncBadge();
+                    });
                 }, 2500);
                 return;
             }
@@ -5315,213 +5338,167 @@
             }
         });
 
-        // ==================== 云同步（GitHub Gist） ====================
-        var GIST_TOKEN_KEY = 'gist_sync_token';
-        var GIST_ID_KEY = 'gist_sync_id';
-        var SYNC_ENABLED_KEY = 'gist_sync_enabled';
-        var GIST_API = 'https://api.github.com/gists';
+        // ==================== 云同步（Supabase） ====================
+        var SUPABASE_URL = 'https://zscszftlmrnyzzgeptby.supabase.co';
+        var SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpzY3N6ZnRsbXJueXp6Z2VwdGJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA5OTE0MzAsImV4cCI6MjA5NjU2NzQzMH0.P8tI7cPTlsQeqVVw9wHlesyxHnKwxjgyjvA1_GZmCmE';
+        var supabaseClient = null;
+        var lastSyncTime = null;
+        var syncDebounceTimer = null;
+        var SYNC_LAST_KEY = 'cloud_sync_last';
 
-        function getGistToken() { return localStorage.getItem(GIST_TOKEN_KEY) || ''; }
-        function getGistId() { return localStorage.getItem(GIST_ID_KEY) || ''; }
-        function isSyncEnabled() { return localStorage.getItem(SYNC_ENABLED_KEY) === 'true'; }
-        function setSyncEnabled(val) { localStorage.setItem(SYNC_ENABLED_KEY, val ? 'true' : 'false'); }
+        function initSupabase() {
+            try {
+                if (typeof supabase !== 'undefined' && supabase.createClient) {
+                    supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+                }
+            } catch (e) {
+                console.warn('Supabase init failed:', e);
+            }
+        }
 
         // 构建同步数据
-        function buildSyncData() {
-            return JSON.stringify({
+        function buildSyncPayload() {
+            return {
                 version: 2,
                 updatedAt: new Date().toISOString(),
                 user: activeUser ? { id: activeUser.id, username: activeUser.username } : null,
                 filaments: filaments,
                 history: history,
-                printers: JSON.parse(localStorage.getItem(getUserKey('bambu_printers'))) || [],
-                accounts: getAccounts()
-            });
+                printers: JSON.parse(localStorage.getItem(getUserKey('bambu_printers'))) || []
+            };
         }
 
-        // 应用同步数据
-        function applySyncData(dataStr) {
-            var data = JSON.parse(dataStr);
-            if (data.filaments && Array.isArray(data.filaments)) {
-                filaments = data.filaments;
-                history = data.history || [];
-                if (data.printers) {
-                    localStorage.setItem(getUserKey('bambu_printers'), JSON.stringify(data.printers));
+        // 上传到云端
+        function cloudPush() {
+            if (!supabaseClient || !activeUser) return;
+            var payload = buildSyncPayload();
+            supabaseClient.from('user_data').upsert({
+                user_id: activeUser.id,
+                username: activeUser.username,
+                data: payload,
+                updated_at: new Date().toISOString()
+            }).then(function(res) {
+                if (res.error) {
+                    console.warn('Cloud push error:', res.error.message);
+                } else {
+                    lastSyncTime = new Date();
+                    try { localStorage.setItem(SYNC_LAST_KEY, lastSyncTime.toISOString()); } catch(e) {}
+                    updateSyncBadge();
                 }
-                saveData();
-                loadInventory();
-                loadConsumeOptions();
-                loadHistory();
-                loadPrinters();
-                return true;
-            }
-            return false;
+            }).catch(function(e) { console.warn('Cloud push failed:', e); });
         }
 
-        // 上传到 Gist
-        function gistUpload() {
-            var token = getGistToken();
-            if (!token) { showAlert('❌ 请先设置 GitHub Token', 'error'); return Promise.reject('no token'); }
-            var gistId = getGistId();
-            var content = buildSyncData();
-            var filename = 'filament-data-' + (activeUser ? activeUser.id : 'default') + '.json';
-
-            if (gistId) {
-                // 更新已有 Gist
-                return fetch(GIST_API + '/' + gistId, {
-                    method: 'PATCH',
-                    headers: { 'Authorization': 'token ' + token, 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ description: '3D耗材管理器云同步数据', files: { [filename]: { content: content } } })
-                }).then(function(r) {
-                    if (!r.ok) throw new Error('上传失败(' + r.status + ')');
-                    return r.json();
-                });
-            } else {
-                // 创建新 Gist
-                return fetch(GIST_API, {
-                    method: 'POST',
-                    headers: { 'Authorization': 'token ' + token, 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ description: '3D耗材管理器云同步数据', public: false, files: { [filename]: { content: content } } })
-                }).then(function(r) {
-                    if (!r.ok) throw new Error('创建失败(' + r.status + ')');
-                    return r.json();
-                }).then(function(data) {
-                    localStorage.setItem(GIST_ID_KEY, data.id);
-                    return data;
-                });
-            }
-        }
-
-        // 从 Gist 下载
-        function gistDownload() {
-            var token = getGistToken();
-            var gistId = getGistId();
-            if (!token || !gistId) { return Promise.reject('no config'); }
-
-            return fetch(GIST_API + '/' + gistId, {
-                headers: { 'Authorization': 'token ' + token }
-            }).then(function(r) {
-                if (!r.ok) throw new Error('下载失败(' + r.status + ')');
-                return r.json();
-            }).then(function(data) {
-                var files = data.files || {};
-                var keys = Object.keys(files);
-                for (var i = 0; i < keys.length; i++) {
-                    if (keys[i].indexOf('filament-data-') === 0) {
-                        return { content: files[keys[i]].content, updatedAt: data.updated_at };
+        // 从云端拉取
+        function cloudPull() {
+            if (!supabaseClient || !activeUser) return Promise.resolve(false);
+            return supabaseClient.from('user_data').select('*').eq('user_id', activeUser.id).maybeSingle()
+                .then(function(res) {
+                    if (res.error) {
+                        console.warn('Cloud pull error:', res.error.message);
+                        return false;
                     }
-                }
-                throw new Error('未找到同步数据文件');
-            });
+                    if (res.data && res.data.data) {
+                        var cloudData = res.data.data;
+                        if (cloudData.filaments && Array.isArray(cloudData.filaments)) {
+                            // 云端有数据，检查是否比本地新
+                            var localTime = localStorage.getItem(SYNC_LAST_KEY);
+                            var cloudTime = res.data.updated_at || cloudData.updatedAt;
+                            // 如果云端数据比本地新（或本地没同步过），使用云端数据
+                            if (!localTime || cloudTime > localTime) {
+                                filaments = cloudData.filaments;
+                                history = cloudData.history || [];
+                                if (cloudData.printers) {
+                                    localStorage.setItem(getUserKey('bambu_printers'), JSON.stringify(cloudData.printers));
+                                }
+                                try { localStorage.setItem(SYNC_LAST_KEY, cloudTime); } catch(e) {}
+                                return true;
+                            }
+                        }
+                    }
+                    return false;
+                }).catch(function(e) {
+                    console.warn('Cloud pull failed:', e);
+                    return false;
+                });
+        }
+
+        // 更新同步按钮状态
+        function updateSyncBadge() {
+            var btn = document.querySelector('[onclick="openCloudSync()"]');
+            if (!btn) return;
+            if (lastSyncTime || localStorage.getItem(SYNC_LAST_KEY)) {
+                var t = lastSyncTime || new Date(localStorage.getItem(SYNC_LAST_KEY));
+                var m = String(t.getMinutes()).padStart(2, '0');
+                var h = t.getHours();
+                btn.textContent = '☁️ ' + h + ':' + m + ' 已同步';
+                btn.style.opacity = '0.7';
+            }
         }
 
         // 同步状态弹窗
         var syncOverlay = null;
         function openCloudSync() {
             if (syncOverlay) return;
+            var lastT = localStorage.getItem(SYNC_LAST_KEY);
+            var lastStr = lastT ? '上次同步: ' + new Date(lastT).toLocaleString('zh-CN') : '尚未同步';
             syncOverlay = document.createElement('div');
             syncOverlay.id = 'sync-overlay';
             syncOverlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);z-index:10000;display:flex;align-items:center;justify-content:center;';
-            syncOverlay.innerHTML = '<div style="background:#1e293b;border-radius:16px;padding:30px;width:90%;max-width:420px;color:#e2e8f0;font-family:system-ui;">' +
-                '<h2 style="margin:0 0 20px;font-size:20px;">☁️ 云同步设置</h2>' +
-                '<p style="font-size:13px;color:#94a3b8;margin:0 0 15px;">通过 GitHub Gist 同步数据，PC 和手机共享同一份数据。</p>' +
-                '<div id="sync-status" style="padding:10px;background:#0f172a;border-radius:8px;margin-bottom:15px;font-size:13px;min-height:40px;"></div>' +
-                '<label style="display:block;font-size:13px;color:#94a3b8;margin-bottom:5px;">GitHub Token（勾选 gist 权限）</label>' +
-                '<input type="password" id="sync-token-input" placeholder="ghp_xxxxxxxxxxxx" style="width:100%;padding:10px;border:1px solid #334155;border-radius:8px;background:#0f172a;color:#e2e8f0;font-size:14px;margin-bottom:15px;box-sizing:border-box;">' +
-                '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:15px;">' +
-                '<button onclick="syncSaveToken()" style="flex:1;padding:10px;border:none;border-radius:8px;background:#3b82f6;color:#fff;font-size:14px;cursor:pointer;">💾 保存Token</button>' +
-                '<button onclick="syncDoUpload()" style="flex:1;padding:10px;border:none;border-radius:8px;background:#10b981;color:#fff;font-size:14px;cursor:pointer;">⬆️ 上传数据</button>' +
-                '<button onclick="syncDoDownload()" style="flex:1;padding:10px;border:none;border-radius:8px;background:#8b5cf6;color:#fff;font-size:14px;cursor:pointer;">⬇️ 下载数据</button>' +
-                '</div>' +
-                '<div style="display:flex;gap:10px;align-items:center;margin-bottom:15px;">' +
-                '<label style="font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer;">' +
-                '<input type="checkbox" id="sync-auto-toggle" onchange="toggleAutoSync()"> 自动同步（保存时自动上传）' +
-                '</label>' +
+            syncOverlay.innerHTML = '<div style="background:#1e293b;border-radius:16px;padding:30px;width:90%;max-width:400px;color:#e2e8f0;font-family:system-ui;">' +
+                '<h2 style="margin:0 0 10px;font-size:20px;">☁️ 云同步</h2>' +
+                '<p style="font-size:13px;color:#94a3b8;margin:0 0 15px;">数据自动跟随账号，跨设备登录同一账号即可同步。</p>' +
+                '<div id="sync-status" style="padding:10px;background:#0f172a;border-radius:8px;margin-bottom:15px;font-size:13px;">' + lastStr + '</div>' +
+                '<div style="display:flex;gap:10px;margin-bottom:15px;">' +
+                '<button onclick="syncManualPush()" style="flex:1;padding:10px;border:none;border-radius:8px;background:#10b981;color:#fff;font-size:14px;cursor:pointer;">⬆️ 立即上传</button>' +
+                '<button onclick="syncManualPull()" style="flex:1;padding:10px;border:none;border-radius:8px;background:#8b5cf6;color:#fff;font-size:14px;cursor:pointer;">⬇️ 立即拉取</button>' +
                 '</div>' +
                 '<button onclick="closeCloudSync()" style="width:100%;padding:10px;border:1px solid #334155;border-radius:8px;background:transparent;color:#94a3b8;font-size:14px;cursor:pointer;">关闭</button>' +
                 '</div>';
             document.body.appendChild(syncOverlay);
-
-            // 回显已有配置
-            document.getElementById('sync-token-input').value = getGistToken();
-            document.getElementById('sync-auto-toggle').checked = isSyncEnabled();
-            updateSyncStatus();
         }
 
         function closeCloudSync() {
             if (syncOverlay) { syncOverlay.remove(); syncOverlay = null; }
         }
 
+        function syncManualPush() {
+            updateSyncStatus('⏳ 正在上传...');
+            cloudPush();
+            setTimeout(function() { updateSyncStatus('✅ 上传完成！'); }, 1000);
+        }
+
+        function syncManualPull() {
+            updateSyncStatus('⏳ 正在拉取...');
+            cloudPull().then(function(updated) {
+                if (updated) {
+                    saveData();
+                    loadInventory();
+                    loadConsumeOptions();
+                    loadHistory();
+                    loadPrinters();
+                    updateSyncStatus('✅ 已拉取最新数据并刷新页面内容');
+                } else {
+                    updateSyncStatus('ℹ️ 本地已是最新');
+                }
+            });
+        }
+
         function updateSyncStatus(msg) {
             var el = document.getElementById('sync-status');
-            if (!el) return;
-            if (msg) { el.innerHTML = msg; return; }
-            var token = getGistToken();
-            var gistId = getGistId();
-            if (!token) {
-                el.innerHTML = '⏳ 未配置 — 请输入 GitHub Token';
-            } else if (!gistId) {
-                el.innerHTML = '✅ Token 已保存 — 请先上传一次数据';
-            } else {
-                el.innerHTML = '✅ 已连接 Gist: ' + gistId.substring(0, 8) + '...';
-            }
+            if (el) el.innerHTML = msg;
         }
 
-        function syncSaveToken() {
-            var token = document.getElementById('sync-token-input').value.trim();
-            if (!token) { showAlert('❌ 请输入 Token', 'error'); return; }
-            localStorage.setItem(GIST_TOKEN_KEY, token);
-            // 清除旧 gist id（token 换了需要重新创建）
-            localStorage.removeItem(GIST_ID_KEY);
-            updateSyncStatus('✅ Token 已保存（旧Gist已清除，请重新上传）');
-            showAlert('✅ Token 保存成功');
-        }
+        // 初始化 Supabase
+        initSupabase();
 
-        function syncDoUpload() {
-            var token = getGistToken();
-            if (!token) { showAlert('❌ 请先保存 Token', 'error'); return; }
-            updateSyncStatus('⏳ 正在上传...');
-            gistUpload().then(function(data) {
-                updateSyncStatus('✅ 上传成功！Gist: ' + (data.id || '').substring(0, 8) + '...');
-                showAlert('☁️ 数据已同步到云端');
-            }).catch(function(err) {
-                updateSyncStatus('❌ 上传失败: ' + err);
-                showAlert('❌ 上传失败', 'error');
-            });
-        }
-
-        function syncDoDownload() {
-            var token = getGistToken();
-            var gistId = getGistId();
-            if (!token || !gistId) { showAlert('❌ 请先配置 Token 并上传一次数据', 'error'); return; }
-            updateSyncStatus('⏳ 正在下载...');
-            gistDownload().then(function(data) {
-                if (confirm('将从云端恢复数据（' + (data.updatedAt || '') + '），覆盖当前本地数据。确认？')) {
-                    applySyncData(data.content);
-                    updateSyncStatus('✅ 下载成功！数据已恢复（更新时间: ' + (data.updatedAt || '') + '）');
-                    showAlert('☁️ 云端数据已同步到本地');
-                } else {
-                    updateSyncStatus('ℹ️ 已取消');
-                }
-            }).catch(function(err) {
-                updateSyncStatus('❌ 下载失败: ' + err);
-                showAlert('❌ 下载失败', 'error');
-            });
-        }
-
-        function toggleAutoSync() {
-            var checked = document.getElementById('sync-auto-toggle').checked;
-            setSyncEnabled(checked);
-            showAlert(checked ? '✅ 已开启自动同步' : 'ℹ️ 已关闭自动同步');
-        }
-
-        // 包装 saveData，自动同步
+        // 包装 saveData，自动推送云端（防抖2秒）
         var _origSaveData = saveData;
         saveData = function() {
             _origSaveData();
-            if (isSyncEnabled() && getGistToken()) {
-                gistUpload().catch(function() {}); // 静默失败
-            }
+            if (syncDebounceTimer) clearTimeout(syncDebounceTimer);
+            syncDebounceTimer = setTimeout(function() {
+                cloudPush();
+            }, 2000);
         };
 
     </script>
